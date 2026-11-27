@@ -275,6 +275,35 @@ bool Bind2Backend::abortTransaction()
   return true;
 }
 
+// Perform adequate escaping of characters which have special meaning in
+// Bind zone files.
+// Note that the input is supposed to be a DNSName::toString() - or any of
+// its variants - so we assume \ and . have been correctly escaped by
+// DNSName::appendEscapedLabel already.
+static const std::string bindEscape(const std::string& name)
+{
+  std::string ret;
+  std::array<char, 5> ebuf{};
+
+  for (char letter : name) {
+    switch (letter) {
+    case '$':
+    case '@':
+    case '"':
+    case ';':
+    case '(':
+    case ')':
+      snprintf(ebuf.data(), ebuf.size(), "\\%03u", static_cast<unsigned char>(letter));
+      ret += ebuf.data();
+      break;
+    default:
+      ret += letter;
+      break;
+    }
+  }
+  return ret;
+}
+
 bool Bind2Backend::feedRecord(const DNSResourceRecord& rr, const DNSName& /* ordername */, bool /* ordernameIsNSEC3 */)
 {
   if (d_transaction_id < 1) {
@@ -283,7 +312,7 @@ bool Bind2Backend::feedRecord(const DNSResourceRecord& rr, const DNSName& /* ord
 
   string qname;
   if (d_transaction_qname.empty()) {
-    qname = rr.qname.toString();
+    qname = bindEscape(rr.qname.toString());
   }
   else if (rr.qname.isPartOf(d_transaction_qname)) {
     if (rr.qname == d_transaction_qname) {
@@ -291,7 +320,7 @@ bool Bind2Backend::feedRecord(const DNSResourceRecord& rr, const DNSName& /* ord
     }
     else {
       DNSName relName = rr.qname.makeRelative(d_transaction_qname);
-      qname = relName.toStringNoDot();
+      qname = bindEscape(relName.toStringNoDot());
     }
   }
   else {
@@ -308,8 +337,8 @@ bool Bind2Backend::feedRecord(const DNSResourceRecord& rr, const DNSName& /* ord
   case QType::CNAME:
   case QType::DNAME:
   case QType::NS:
-    stripDomainSuffix(&content, d_transaction_qname.toString());
-    // fallthrough
+    stripDomainSuffix(&content, d_transaction_qname);
+    [[fallthrough]];
   default:
     if (d_of && *d_of) {
       *d_of << qname << "\t" << rr.ttl << "\t" << rr.qtype.toString() << "\t" << content << endl;
@@ -1413,13 +1442,35 @@ BB2DomainInfo Bind2Backend::createDomainEntry(const DNSName& domain, const strin
   return bbd;
 }
 
-bool Bind2Backend::createSecondaryDomain(const string& ip, const DNSName& domain, const string& /* nameserver */, const string& account)
+bool Bind2Backend::createSecondaryDomain(const string& ipAddress, const DNSName& domain, const string& /* nameserver */, const string& account)
 {
-  string filename = getArg("autoprimary-destdir") + '/' + domain.toStringNoDot();
+  std::string domainname = domain.toStringNoDot();
+
+  // Reject domain name if it embeds quotes; this may happen if 8bit-dns is
+  // used, and bind currently does not allow for character escapes in zone
+  // names.
+  if (domainname.find_first_of("\"") != std::string::npos) {
+    SLOG(g_log << Logger::Error << d_logprefix
+               << " Unable to accept autosecondary zone '" << domain
+               << "' from autoprimary " << ipAddress
+               << " due to unauthorized characters in domain name for bind configuration file"
+               << endl,
+         d_slog->error(Logr::Error, "unauthorized characters in domain name for bind configuration file", "Unable to accept autosecondary zone", "zone", Logging::Loggable(domain), "autoprimary address", Logging::Loggable(ipAddress)));
+    throw PDNSException("Unauthorized characters in domain name for bind configuration file");
+  }
+
+  string filename = getArg("autoprimary-destdir") + '/';
+  if (domainname.empty()) {
+    filename.append("rootzone.");
+  }
+  else {
+    // Make sure the zone file name does not contain path separators.
+    filename.append(boost::replace_all_copy(domainname, "/", "\\047"));
+  }
 
   g_log << Logger::Warning << d_logprefix
         << " Writing bind config zone statement for superslave zone '" << domain
-        << "' from autoprimary " << ip << endl;
+        << "' from autoprimary " << ipAddress << endl;
 
   {
     std::lock_guard<std::mutex> l2(s_autosecondary_config_lock);
@@ -1431,18 +1482,18 @@ bool Bind2Backend::createSecondaryDomain(const string& ip, const DNSName& domain
     }
 
     c_of << endl;
-    c_of << "# AutoSecondary zone '" << domain.toString() << "' (added: " << nowTime() << ") (account: " << account << ')' << endl;
-    c_of << "zone \"" << domain.toStringNoDot() << "\" {" << endl;
+    c_of << "# AutoSecondary zone '" << domainname << "' (added: " << nowTime() << ") (account: " << account << ')' << endl;
+    c_of << "zone \"" << domainname << "\" {" << endl;
     c_of << "\ttype secondary;" << endl;
     c_of << "\tfile \"" << filename << "\";" << endl;
-    c_of << "\tprimaries { " << ip << "; };" << endl;
+    c_of << "\tprimaries { " << ipAddress << "; };" << endl;
     c_of << "};" << endl;
     c_of.close();
   }
 
   BB2DomainInfo bbd = createDomainEntry(domain, filename);
   bbd.d_kind = DomainInfo::Secondary;
-  bbd.d_primaries.push_back(ComboAddress(ip, 53));
+  bbd.d_primaries.push_back(ComboAddress(ipAddress, 53));
   bbd.setCtime();
   safePutBBDomainInfo(bbd);
 

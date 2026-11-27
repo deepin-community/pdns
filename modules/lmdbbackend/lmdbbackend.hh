@@ -61,6 +61,7 @@ class LMDBBackend : public DNSBackend
 {
 public:
   explicit LMDBBackend(const string& suffix = "");
+  ~LMDBBackend();
 
   bool list(const DNSName& target, int id, bool include_disabled) override;
 
@@ -304,11 +305,19 @@ private:
 
   shared_ptr<RecordsROTransaction> d_rotxn; // for lookup and list
   shared_ptr<RecordsRWTransaction> d_rwtxn; // for feedrecord within begin/aborttransaction
+  bool d_txnorder{false}; // whether d_rotxn is more recent than d_rwtxn
   std::shared_ptr<RecordsRWTransaction> getRecordsRWTransaction(uint32_t id);
   std::shared_ptr<RecordsROTransaction> getRecordsROTransaction(uint32_t id, const std::shared_ptr<LMDBBackend::RecordsRWTransaction>& rwtxn = nullptr);
   int genChangeDomain(const DNSName& domain, const std::function<void(DomainInfo&)>& func);
   int genChangeDomain(uint32_t id, const std::function<void(DomainInfo&)>& func);
   void deleteDomainRecords(RecordsRWTransaction& txn, uint32_t domain_id, uint16_t qtype = QType::ANY);
+
+  bool findDomain(const DNSName& domain, DomainInfo& info) const;
+  bool findDomain(uint32_t domainid, DomainInfo& info) const;
+  void consolidateDomainInfo(DomainInfo& info) const;
+  void writeDomainInfo(const DomainInfo& info);
+
+  void setLastCheckTime(uint32_t domain_id, time_t last_check);
 
   void getAllDomainsFiltered(vector<DomainInfo>* domains, const std::function<bool(DomainInfo&)>& allow);
 
@@ -321,16 +330,39 @@ private:
   std::string d_matchkey;
   DNSName d_lookupdomain;
 
+  // Transient DomainInfo data, not necessarily synchronized with the
+  // database.
+  struct TransientDomainInfo
+  {
+    time_t last_check{};
+    uint32_t notified_serial{};
+  };
+  // Cache of DomainInfo notified_serial values
+  class TransientDomainInfoCache : public boost::noncopyable
+  {
+  public:
+    bool get(uint32_t domainid, TransientDomainInfo& data) const;
+    void remove(uint32_t domainid);
+    void update(uint32_t domainid, const TransientDomainInfo& data);
+
+  private:
+    std::unordered_map<uint32_t, TransientDomainInfo> d_data;
+  };
+  static SharedLockGuarded<TransientDomainInfoCache> s_transient_domain_info;
+
   vector<LMDBResourceRecord> d_currentrrset;
   size_t d_currentrrsetpos;
+  time_t d_currentrrsettime;
   MDBOutVal d_currentKey;
   MDBOutVal d_currentVal;
-  bool d_includedisabled;
+  bool d_includedisabled{false};
 
   DNSName d_transactiondomain;
   uint32_t d_transactiondomainid;
   bool d_dolog;
   bool d_random_ids;
   bool d_handle_dups;
+  bool d_write_notification_update;
   DTime d_dtime; // used only for logging
+  uint64_t d_mapsize;
 };

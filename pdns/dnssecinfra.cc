@@ -782,7 +782,7 @@ static string makeTSIGPayload(const string& previous, const char* packetBegin, s
   DNSPacketWriter dw(signVect, DNSName(), 0);
   auto pos=signVect.size();
   if(!timersonly) {
-    dw.xfrName(tsigKeyName, false);
+    dw.xfrName(tsigKeyName.makeLowerCase(), false);
     dw.xfr16BitInt(QClass::ANY); // class
     dw.xfr32BitInt(0);    // TTL
     dw.xfrName(trc.d_algoName.makeLowerCase(), false);
@@ -866,7 +866,6 @@ bool validateTSIG(const std::string& packet, size_t sigPos, const TSIGTriplet& t
   tsigMsg = makeTSIGMessageFromTSIGPacket(packet, sigPos, tt.name, trc, previousMAC, timersOnly, dnsHeaderOffset);
 
   if (algo == TSIG_GSS) {
-    GssContext gssctx(tt.name);
     if (!gss_verify_signature(tt.name, tsigMsg, theirMAC)) {
       throw std::runtime_error("Signature with TSIG key '"+tt.name.toLogString()+"' failed to validate");
     }

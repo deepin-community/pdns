@@ -4611,7 +4611,7 @@ api-swagger.yaml: $(wildcard ${srcdir}/../docs/http-api/swagger/authoritative-ap
 
 @HAVE_VENV_TRUE@api-swagger.json: api-swagger.yaml requirements.txt
 @HAVE_VENV_TRUE@	$(PYTHON) -m venv .venv
-@HAVE_VENV_TRUE@	.venv/bin/pip install -U pip setuptools setuptools-git wheel
+@HAVE_VENV_TRUE@	.venv/bin/pip install -U pip "setuptools<82" setuptools-git wheel
 @HAVE_VENV_TRUE@	.venv/bin/pip install -r ${srcdir}/requirements.txt
 @HAVE_VENV_TRUE@	.venv/bin/python ${srcdir}/convert-yaml-to-json.py $< $@
 @HAVE_API_SWAGGER_JSON_FALSE@@HAVE_VENV_FALSE@api-swagger.json:

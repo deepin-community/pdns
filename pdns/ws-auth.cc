@@ -89,7 +89,7 @@ double Ewma::getMax() const
   return d_max;
 }
 
-static void patchZone(UeberBackend& backend, const DNSName& zonename, DomainInfo& domainInfo, HttpRequest* req, HttpResponse* resp);
+static void patchZone(UeberBackend& backend, const DNSName& zonename, DomainInfo& domainInfo, const vector<Json>& rrsets, HttpResponse* resp);
 
 // QTypes that MUST NOT have multiple records of the same type in a given RRset.
 static const std::set<uint16_t> onlyOneEntryTypes = {QType::CNAME, QType::DNAME, QType::SOA};
@@ -125,6 +125,10 @@ AuthWebServer::AuthWebServer() :
 
 void AuthWebServer::go(StatBag& stats)
 {
+  // Compute a unique random value used for indexPOST validation
+  std::array<char, 32> buf{};
+  dns_random(buf.data(), buf.size());
+  d_unique = Base64Encode(std::string(buf.data(), buf.size()));
   S.doRings();
   std::thread webT([this]() { webThread(); });
   webT.detach();
@@ -175,7 +179,7 @@ static string htmlescape(const string& inputString)
   return result;
 }
 
-static void printtable(ostringstream& ret, const string& ringname, const string& title, int limit = 10)
+static void printtable(ostringstream& ret, const string& ringname, const std::string& unique, const string& title, int limit = 10)
 {
   unsigned int tot = 0;
   int entries = 0;
@@ -187,21 +191,38 @@ static void printtable(ostringstream& ret, const string& ringname, const string&
   }
 
   ret << "<div class=\"panel\">";
-  ret << "<span class=resetring><i></i><a href=\"?resetring=" << htmlescape(ringname) << "\">Reset</a></span>" << endl;
+
+  // NOLINTBEGIN(modernize-raw-string-literal)
+  ret << "<span class=resetring><i></i>";
+  ret << "<form method=\"post\">";
+  ret << "<input type=\"hidden\" name=\"resetring\" value=\"" << htmlescape(ringname) << "\" />";
+  ret << "<input type=\"hidden\" name=\"unique\" value=\"" << htmlescape(unique) << "\" />";
+  ret << "<input type=\"submit\" value=\"reset\" />";
+  ret << "</form>";
+  ret << "</span>" << endl;
+
   ret << "<h2>" << title << "</h2>" << endl;
   ret << "<div class=ringmeta>";
   ret << "<a class=topXofY href=\"?ring=" << htmlescape(ringname) << "\">Showing: Top " << limit << " of " << entries << "</a>" << endl;
-  ret << "<span class=resizering>Resize: ";
-  std::vector<uint64_t> sizes{10, 100, 500, 1000, 10000, 500000, 0};
-  for (int i = 0; sizes[i] != 0; ++i) {
-    if (S.getRingSize(ringname) != sizes[i]) {
-      ret << "<a href=\"?resizering=" << htmlescape(ringname) << "&amp;size=" << sizes[i] << "\">" << sizes[i] << "</a> ";
+
+  ret << "<span class=resizering>";
+  ret << "<form method=\"post\">";
+  ret << "<input type=\"hidden\" name=\"resizering\" value=\"" << htmlescape(ringname) << "\" />";
+  ret << "<input type=\"hidden\" name=\"unique\" value=\"" << htmlescape(unique) << "\" />";
+  ret << "<select name=\"size\">";
+  static const std::vector<uint64_t> sizes{10, 100, 500, 1000, 10000, 500000, 0};
+  for (const auto size : sizes) {
+    ret << "<option value=\"" << size << "\"";
+    if (S.getRingSize(ringname) == size) {
+      ret << " selected";
     }
-    else {
-      ret << "(" << sizes[i] << ") ";
-    }
+    ret << ">" << size << "</option>";
   }
+  ret << "</select>";
+  ret << "<input type=\"submit\" value=\"resize\" />";
+  ret << "</form>";
   ret << "</span></div>";
+  // NOLINTEND(modernize-raw-string-literal)
 
   ret << "<table class=\"data\">";
   unsigned int printed = 0;
@@ -246,26 +267,8 @@ string AuthWebServer::makePercentage(const double& val)
   return (boost::format("%.01f%%") % val).str();
 }
 
-void AuthWebServer::indexfunction(HttpRequest* req, HttpResponse* resp)
+void AuthWebServer::indexGET(HttpRequest* req, HttpResponse* resp)
 {
-  if (!req->getvars["resetring"].empty()) {
-    if (S.ringExists(req->getvars["resetring"])) {
-      S.resetRing(req->getvars["resetring"]);
-    }
-    resp->status = 302;
-    resp->headers["Location"] = req->url.path;
-    return;
-  }
-  if (!req->getvars["resizering"].empty()) {
-    int size = std::stoi(req->getvars["size"]);
-    if (S.ringExists(req->getvars["resizering"]) && size > 0 && size <= 500000) {
-      S.resizeRing(req->getvars["resizering"], std::stoi(req->getvars["size"]));
-    }
-    resp->status = 302;
-    resp->headers["Location"] = req->url.path;
-    return;
-  }
-
   ostringstream ret;
 
   ret << "<!DOCTYPE html>" << endl;
@@ -301,10 +304,11 @@ void AuthWebServer::indexfunction(HttpRequest* req, HttpResponse* resp)
   ret << "Backend query load, 1, 5, 10 minute averages: " << std::setprecision(3) << (int)d_qcachemisses.get1() << ", " << (int)d_qcachemisses.get5() << ", " << (int)d_qcachemisses.get10() << ". Max queries/second: " << (int)d_qcachemisses.getMax() << "<br>" << endl;
 
   ret << "Total queries: " << S.read("udp-queries") << ". Question/answer latency: " << static_cast<double>(S.read("latency")) / 1000.0 << "ms</p><br>" << endl;
-  if (req->getvars["ring"].empty()) {
+  auto ringname = req->getvars["ring"];
+  if (ringname.empty()) {
     auto entries = S.listRings();
     for (const auto& entry : entries) {
-      printtable(ret, entry, S.getRingTitle(entry));
+      printtable(ret, entry, d_unique, S.getRingTitle(entry));
     }
 
     printvars(ret);
@@ -312,8 +316,8 @@ void AuthWebServer::indexfunction(HttpRequest* req, HttpResponse* resp)
       printargs(ret);
     }
   }
-  else if (S.ringExists(req->getvars["ring"])) {
-    printtable(ret, req->getvars["ring"], S.getRingTitle(req->getvars["ring"]), 100);
+  else if (S.ringExists(ringname)) {
+    printtable(ret, ringname, d_unique, S.getRingTitle(ringname), 100);
   }
 
   ret << "</div></div>" << endl;
@@ -322,6 +326,37 @@ void AuthWebServer::indexfunction(HttpRequest* req, HttpResponse* resp)
 
   resp->body = ret.str();
   resp->status = 200;
+}
+
+void AuthWebServer::indexPOST(HttpRequest* req, HttpResponse* resp)
+{
+  string unique = req->postvars["unique"];
+  if (unique != d_unique) {
+    throw HttpForbiddenException();
+  }
+
+  string ring = req->postvars["resetring"];
+  if (!ring.empty()) {
+    if (S.ringExists(ring)) {
+      S.resetRing(ring);
+    }
+    resp->status = 302;
+    resp->headers["Location"] = req->url.path;
+    return;
+  }
+
+  ring = req->postvars["resizering"];
+  if (!ring.empty()) {
+    int size = std::stoi(req->postvars["size"]);
+    if (S.ringExists(ring) && size > 0 && size <= 500000 && S.getRingSize(ring) != static_cast<unsigned int>(size)) {
+      S.resizeRing(ring, size);
+    }
+    resp->status = 302;
+    resp->headers["Location"] = req->url.path;
+    return;
+  }
+
+  throw HttpForbiddenException();
 }
 
 /** Helper to build a record content as needed. */
@@ -523,9 +558,13 @@ static void fillZone(UeberBackend& backend, const DNSName& zonename, HttpRespons
 
       while (rit != records.end() && rit->qname == current_qname && rit->qtype == current_qtype) {
         ttl = min(ttl, rit->ttl);
-        rrset_records.push_back(Json::object{
+        auto object = Json::object{
           {"disabled", rit->disabled},
-          {"content", makeApiRecordContent(rit->qtype, rit->content)}});
+          {"content", makeApiRecordContent(rit->qtype, rit->content)}};
+        if (rit->last_modified != 0) {
+          object["modified_at"] = (double)rit->last_modified;
+        }
+        rrset_records.push_back(object);
         rit++;
       }
       while (cit != comments.end() && cit->qname == current_qname && cit->qtype == current_qtype) {
@@ -2021,27 +2060,33 @@ static void apiServerZonesPOST(HttpRequest* req, HttpResponse* resp)
 
   domainInfo.backend->startTransaction(zonename, static_cast<int>(domainInfo.id));
 
-  // will be overridden by updateDomainSettingsFromDocument, if given in document.
-  domainInfo.backend->setDomainMetadataOne(zonename, "SOA-EDIT-API", "DEFAULT");
+  try {
+    // will be overridden by updateDomainSettingsFromDocument, if given in document.
+    domainInfo.backend->setDomainMetadataOne(zonename, "SOA-EDIT-API", "DEFAULT");
 
-  for (auto& resourceRecord : new_records) {
-    resourceRecord.domain_id = static_cast<int>(domainInfo.id);
-    domainInfo.backend->feedRecord(resourceRecord, DNSName());
-  }
-  for (Comment& comment : new_comments) {
-    comment.domain_id = static_cast<int>(domainInfo.id);
-    if (!domainInfo.backend->feedComment(comment)) {
-      throw ApiException("Hosting backend does not support editing comments.");
+    for (auto& resourceRecord : new_records) {
+      resourceRecord.domain_id = static_cast<int>(domainInfo.id);
+      domainInfo.backend->feedRecord(resourceRecord, DNSName());
+    }
+    for (Comment& comment : new_comments) {
+      comment.domain_id = static_cast<int>(domainInfo.id);
+      if (!domainInfo.backend->feedComment(comment)) {
+        throw ApiException("Hosting backend does not support editing comments.");
+      }
+    }
+
+    updateDomainSettingsFromDocument(backend, domainInfo, zonename, document, !new_records.empty());
+
+    if (!catalog && kind == DomainInfo::Primary) {
+      const auto& defaultCatalog = ::arg()["default-catalog-zone"];
+      if (!defaultCatalog.empty()) {
+        domainInfo.backend->setCatalog(zonename, DNSName(defaultCatalog));
+      }
     }
   }
-
-  updateDomainSettingsFromDocument(backend, domainInfo, zonename, document, !new_records.empty());
-
-  if (!catalog && kind == DomainInfo::Primary) {
-    const auto& defaultCatalog = ::arg()["default-catalog-zone"];
-    if (!defaultCatalog.empty()) {
-      domainInfo.backend->setCatalog(zonename, DNSName(defaultCatalog));
-    }
+  catch (...) {
+    domainInfo.backend->abortTransaction();
+    throw;
   }
 
   domainInfo.backend->commitTransaction();
@@ -2228,7 +2273,14 @@ static void apiServerZoneDetailDELETE(HttpRequest* req, HttpResponse* resp)
 static void apiServerZoneDetailPATCH(HttpRequest* req, HttpResponse* resp)
 {
   ZoneData zoneData{req};
-  patchZone(zoneData.backend, zoneData.zoneName, zoneData.domainInfo, req, resp);
+  Json document = req->json();
+
+  auto rrsets = document["rrsets"];
+  if (!rrsets.is_array()) {
+    throw ApiException("No rrsets given in update request");
+  }
+
+  patchZone(zoneData.backend, zoneData.zoneName, zoneData.domainInfo, rrsets.array_items(), resp);
 }
 
 static void apiServerZoneDetailGET(HttpRequest* req, HttpResponse* resp)
@@ -2306,173 +2358,383 @@ static void apiServerZoneRectify(HttpRequest* req, HttpResponse* resp)
   resp->setSuccessResult("Rectified");
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity): TODO Refactor this function.
-static void patchZone(UeberBackend& backend, const DNSName& zonename, DomainInfo& domainInfo, HttpRequest* req, HttpResponse* resp)
+// The allowed values for the "changetype" field of a Json patch record.
+enum changeType
 {
-  bool zone_disabled = false;
-  SOAData soaData;
+  DELETE, // delete complete RRset
+  REPLACE, // replace complete RRset
+  PRUNE, // remove single record from RRset if found
+  EXTEND // add single record to RRset if not found
+};
+
+// Validate the "changetype" field of a Json patch record.
+// Returns the recognized operation.
+// Throws an exception if unrecognized.
+static changeType validateChangeType(const std::string& changetype)
+{
+  if (changetype == "DELETE") {
+    return DELETE;
+  }
+  if (changetype == "REPLACE") {
+    return REPLACE;
+  }
+  if (changetype == "PRUNE") {
+    return PRUNE;
+  }
+  if (changetype == "EXTEND") {
+    return EXTEND;
+  }
+  throw ApiException("Changetype '" + changetype + "' is not a valid value");
+}
+
+// Replace the rrset for `qname' in zone `zonename' with the contents of
+// `new_records', making sure to remove no longer needed ENT entries, and
+// also enforcing the exclusivity rules (at most one CNAME, DNAME and SOA,
+// etc).
+static void replaceZoneRecords(const DomainInfo& domainInfo, const DNSName& zonename, vector<DNSResourceRecord>& new_records, const DNSName& qname, const QType qtype)
+{
+  bool ent_present = false;
+  bool dname_seen = qtype == QType::DNAME;
+  bool ns_seen = qtype == QType::NS;
+
+  domainInfo.backend->lookup(QType(QType::ANY), qname, static_cast<int>(domainInfo.id));
+  DNSResourceRecord resourceRecord;
+  while (domainInfo.backend->get(resourceRecord)) {
+    if (resourceRecord.qtype.getCode() == QType::ENT) {
+      ent_present = true;
+      // that's fine, we will override it
+      continue;
+    }
+    dname_seen |= resourceRecord.qtype == QType::DNAME;
+    ns_seen |= resourceRecord.qtype == QType::NS;
+    if (qtype.getCode() != resourceRecord.qtype.getCode()
+        && (exclusiveEntryTypes.count(qtype.getCode()) != 0
+            || exclusiveEntryTypes.count(resourceRecord.qtype.getCode()) != 0)) {
+      // leave database handle in a consistent state
+      while (domainInfo.backend->get(resourceRecord)) {
+        ;
+      }
+      throw ApiException("RRset " + qname.toString() + " IN " + qtype.toString() + ": Conflicts with pre-existing RRset");
+    }
+  }
+  if (dname_seen && ns_seen && qname != zonename) {
+    throw ApiException("RRset " + qname.toString() + " IN " + qtype.toString() + ": Cannot have both NS and DNAME except in zone apex");
+  }
+  if (!new_records.empty() && ent_present) {
+    QType qt_ent{QType::ENT};
+    if (!domainInfo.backend->replaceRRSet(domainInfo.id, qname, qt_ent, {})) {
+      throw ApiException("Hosting backend does not support editing records.");
+    }
+  }
+  if (!domainInfo.backend->replaceRRSet(domainInfo.id, qname, qtype, new_records)) {
+    throw ApiException("Hosting backend does not support editing records.");
+  }
+}
+
+// Parse the record name and type from a Json patch record.
+static void parseRecordNameAndType(const Json& rrset, DNSName& qname, QType& qtype)
+{
+  qname = apiNameToDNSName(stringFromJson(rrset, "name"));
+  apiCheckQNameAllowedCharacters(qname.toString());
+  qtype = stringFromJson(rrset, "type");
+  if (qtype.getCode() == QType::ENT) {
+    throw ApiException("RRset " + qname.toString() + " IN " + stringFromJson(rrset, "type") + ": unknown type given");
+  }
+}
+
+// The return value of the apply* functions below
+enum applyResult
+{
+  SUCCESS, // successful and changes performed
+  NOP, // successful but no changes needed
+#if 0 // Not possible in 4.9.x
+  ABORT // failed horribly, don't process anything further
+#endif
+};
+
+// Apply a DELETE changetype.
+static applyResult applyDelete(const DomainInfo& domainInfo, DNSName& qname, QType& qtype, bool returnRRset, std::vector<DNSResourceRecord>& rrset)
+{
+  // Delete all matching qname/qtype RRs (and implicitly, comments).
+  if (!domainInfo.backend->replaceRRSet(domainInfo.id, qname, qtype, {})) {
+    throw ApiException("Hosting backend does not support editing records.");
+  }
+  // Update RRset cache if needed
+  if (returnRRset) {
+    rrset.clear();
+  }
+  return SUCCESS;
+}
+
+// Struct gathering the SOA edition details, so as not to pass too many
+// billions of parameters to applyReplace() below.
+struct soaEditSettings
+{
+  bool edit_done{false};
+  string edit_api_kind;
+  string edit_kind;
+};
+
+// Apply a REPLACE changetype.
+static applyResult applyReplace(const DomainInfo& domainInfo, const DNSName& zonename, const Json& container, DNSName& qname, QType& qtype, soaEditSettings& soa, bool returnRRset, std::vector<DNSResourceRecord>& rrset)
+{
+  bool replace_records = container["records"].is_array();
+  bool replace_comments = container["comments"].is_array();
+
+  if (!replace_records && !replace_comments) {
+    throw ApiException("No change for RRset " + qname.toString() + " IN " + qtype.toString());
+  }
 
   vector<DNSResourceRecord> new_records;
   vector<Comment> new_comments;
-  vector<DNSResourceRecord> new_ptrs;
-
-  Json document = req->json();
-
-  auto rrsets = document["rrsets"];
-  if (!rrsets.is_array()) {
-    throw ApiException("No rrsets given in update request");
-  }
-
-  domainInfo.backend->startTransaction(zonename);
 
   try {
-    string soa_edit_api_kind;
-    string soa_edit_kind;
-    domainInfo.backend->getDomainMetadataOne(zonename, "SOA-EDIT-API", soa_edit_api_kind);
-    domainInfo.backend->getDomainMetadataOne(zonename, "SOA-EDIT", soa_edit_kind);
-    bool soa_edit_done = false;
+    if (replace_records) {
+      // ttl shouldn't be required if we don't get new records.
+      uint32_t ttl = uintFromJson(container, "ttl");
+      gatherRecords(container, qname, qtype, ttl, new_records);
 
-    set<std::tuple<DNSName, QType, string>> seen;
-
-    for (const auto& rrset : rrsets.array_items()) {
-      string changetype = toUpper(stringFromJson(rrset, "changetype"));
-      DNSName qname = apiNameToDNSName(stringFromJson(rrset, "name"));
-      apiCheckQNameAllowedCharacters(qname.toString());
-      QType qtype;
-      qtype = stringFromJson(rrset, "type");
-      if (qtype.getCode() == 0) {
-        throw ApiException("RRset " + qname.toString() + " IN " + stringFromJson(rrset, "type") + ": unknown type given");
-      }
-
-      if (seen.count({qname, qtype, changetype}) != 0) {
-        throw ApiException("Duplicate RRset " + qname.toString() + " IN " + qtype.toString() + " with changetype: " + changetype);
-      }
-      seen.insert({qname, qtype, changetype});
-
-      if (changetype == "DELETE") {
-        // delete all matching qname/qtype RRs (and, implicitly comments).
-        if (!domainInfo.backend->replaceRRSet(domainInfo.id, qname, qtype, vector<DNSResourceRecord>())) {
-          throw ApiException("Hosting backend does not support editing records.");
+      for (DNSResourceRecord& resourceRecord : new_records) {
+        resourceRecord.domain_id = static_cast<int>(domainInfo.id);
+        if (resourceRecord.qtype.getCode() == QType::SOA && resourceRecord.qname == zonename) {
+          soa.edit_done = increaseSOARecord(resourceRecord, soa.edit_api_kind, soa.edit_kind);
         }
       }
-      else if (changetype == "REPLACE") {
-        // we only validate for REPLACE, as DELETE can be used to "fix" out of zone records.
-        if (!qname.isPartOf(zonename) && qname != zonename) {
+      checkNewRecords(new_records, zonename);
+    }
+
+    if (replace_comments) {
+      gatherComments(container, qname, qtype, new_comments);
+
+      for (Comment& comment : new_comments) {
+        comment.domain_id = static_cast<int>(domainInfo.id);
+      }
+    }
+  }
+  catch (const JsonException& e) {
+    throw ApiException("New RRsets are invalid: " + string(e.what()));
+  }
+
+  if (replace_records) {
+    replaceZoneRecords(domainInfo, zonename, new_records, qname, qtype);
+  }
+  if (replace_comments) {
+    if (!domainInfo.backend->replaceComments(domainInfo.id, qname, qtype, new_comments)) {
+      throw ApiException("Hosting backend does not support editing comments.");
+    }
+  }
+  // Update RRset cache if needed
+  if (returnRRset) {
+    rrset = std::move(new_records);
+  }
+  return SUCCESS;
+}
+
+static applyResult applyPruneOrExtend(const DomainInfo& domainInfo, const DNSName& zonename, const Json& container, DNSName& qname, QType& qtype, soaEditSettings& soa, changeType operationType, std::vector<DNSResourceRecord>& rrset)
+{
+  if (!container["records"].is_array()) {
+    throw ApiException("No record provided for PRUNE or EXTEND operation");
+  }
+
+  try {
+    vector<DNSResourceRecord> new_records;
+    uint32_t ttl = uintFromJson(container, "ttl");
+    gatherRecords(container, qname, qtype, ttl, new_records);
+    if (new_records.size() != 1) {
+      throw ApiException("Exactly one record should be provided for PRUNE or EXTEND operation");
+    }
+
+    auto& new_record = new_records.front();
+    new_record.domain_id = static_cast<int>(domainInfo.id);
+    if (new_record.qtype.getCode() == QType::SOA && new_record.qname == zonename) {
+      soa.edit_done = increaseSOARecord(new_record, soa.edit_api_kind, soa.edit_kind);
+    }
+
+    checkNewRecords(new_records, zonename);
+
+    // Check if this record exists in the RRSet
+    bool seenRecord{false};
+    for (auto iter = rrset.begin(); iter != rrset.end(); ++iter) {
+      if (iter->content == new_record.content) {
+        // We found the record we've been instructed to add or delete.
+        seenRecord = true;
+        // If it is to be added, we don't have anything more to do.
+        // If it is to be deleted, just remove it from the RRset we're building.
+        if (operationType == PRUNE) {
+          rrset.erase(iter);
+        }
+        break;
+      }
+    }
+    // Add new record to RRset if not found.
+    if (operationType == EXTEND && !seenRecord) {
+      rrset.emplace_back(new_record);
+    }
+    bool submitChanges = (operationType == EXTEND && !seenRecord) || (operationType == PRUNE && seenRecord);
+    if (!submitChanges) {
+      return NOP;
+    }
+    if (!domainInfo.backend->replaceRRSet(domainInfo.id, qname, qtype, rrset)) {
+      throw ApiException("Hosting backend does not support editing records.");
+    }
+  }
+  catch (const JsonException& e) {
+    throw ApiException("Submitted record is invalid: " + string(e.what()));
+  }
+  return SUCCESS;
+}
+
+static void patchZone(UeberBackend& backend, const DNSName& zonename, DomainInfo& domainInfo, const vector<Json>& rrsets, HttpResponse* resp)
+{
+  bool madeAnyChanges{false};
+  domainInfo.backend->startTransaction(zonename);
+  try {
+    soaEditSettings soa;
+    domainInfo.backend->getDomainMetadataOne(zonename, "SOA-EDIT-API", soa.edit_api_kind);
+    domainInfo.backend->getDomainMetadataOne(zonename, "SOA-EDIT", soa.edit_kind);
+
+    // For PRUNE and EXTEND operations, we are not being passed the complete
+    // RRset, and will need to fetch it from the backend. But we may have
+    // processed a DELETE or REPLACE operation for the same RRset first, in
+    // which case we can't assume querying the backend will be consistent with
+    // the results of that last operation, since we are within a not commited
+    // yet transaction.
+    // To be sure to work on consistent contents, without having to rely upon
+    // specific backend behaviour, we will need to cache the RRset values
+    // in this routine, but we only need to do that for RRset which are
+    // subject to both PRUNE/EXTEND and DELETE/REPLACE operation.
+    // That first pass over the change requests computes this (and also
+    // performs basic validation).
+    using key = std::pair<DNSName, QType>;
+    std::map<key, unsigned int> changes;
+    for (const auto& rrset : rrsets) {
+      string changetype = toUpper(stringFromJson(rrset, "changetype"));
+      auto operationType = validateChangeType(changetype);
+      DNSName qname;
+      QType qtype;
+      parseRecordNameAndType(rrset, qname, qtype);
+
+      if (operationType != DELETE) {
+        if (domainInfo.kind == DomainInfo::Consumer) {
+          // Allow deleting all RRsets, just not modifying them.
+          throw ApiException("Modifying RRsets in Consumer zones is unsupported");
+        }
+
+        // We intentionally do not perform this check for DELETE, as it can be
+        // used as a poor man's way to "fix" out-of-zone records.
+        if (!qname.isPartOf(zonename)) {
           throw ApiException("RRset " + qname.toString() + " IN " + qtype.toString() + ": Name is out of zone");
         }
+      }
 
-        bool replace_records = rrset["records"].is_array();
-        bool replace_comments = rrset["comments"].is_array();
-
-        if (!replace_records && !replace_comments) {
-          throw ApiException("No change for RRset " + qname.toString() + " IN " + qtype.toString());
-        }
-
-        new_records.clear();
-        new_comments.clear();
-
-        try {
-          if (replace_records) {
-            // ttl shouldn't be part of DELETE, and it shouldn't be required if we don't get new records.
-            uint32_t ttl = uintFromJson(rrset, "ttl");
-            gatherRecords(rrset, qname, qtype, ttl, new_records);
-
-            for (DNSResourceRecord& resourceRecord : new_records) {
-              resourceRecord.domain_id = static_cast<int>(domainInfo.id);
-              if (resourceRecord.qtype.getCode() == QType::SOA && resourceRecord.qname == zonename) {
-                soa_edit_done = increaseSOARecord(resourceRecord, soa_edit_api_kind, soa_edit_kind);
-              }
-            }
-            checkNewRecords(new_records, zonename);
-          }
-
-          if (replace_comments) {
-            gatherComments(rrset, qname, qtype, new_comments);
-
-            for (Comment& comment : new_comments) {
-              comment.domain_id = static_cast<int>(domainInfo.id);
-            }
+      // At this point, we store a bitmask of the operations which will need
+      // to be performed.
+      unsigned int newOperation = 1U << operationType;
+      key currentKey{qname, qtype};
+      if (auto iter = changes.find(currentKey); iter != changes.end()) {
+        auto operations = iter->second;
+        // Only allow one DELETE or REPLACE operation per RRset. On the other
+        // hand, it makes sense to allow multiple PRUNE or EXTEND, since the
+        // individual records they'll concern might differ.
+        if (operationType == DELETE || operationType == REPLACE) {
+          if ((operations & newOperation) != 0) {
+            throw ApiException("Duplicate RRset " + qname.toString() + " IN " + qtype.toString() + " with changetype: " + changetype);
           }
         }
-        catch (const JsonException& e) {
-          throw ApiException("New RRsets are invalid: " + string(e.what()));
-        }
-
-        if (replace_records) {
-          bool ent_present = false;
-          bool dname_seen = false;
-          bool ns_seen = false;
-
-          domainInfo.backend->lookup(QType(QType::ANY), qname, static_cast<int>(domainInfo.id));
-          DNSResourceRecord resourceRecord;
-          while (domainInfo.backend->get(resourceRecord)) {
-            if (resourceRecord.qtype.getCode() == QType::ENT) {
-              ent_present = true;
-              /* that's fine, we will override it */
-              continue;
-            }
-            if (qtype == QType::DNAME || resourceRecord.qtype == QType::DNAME) {
-              dname_seen = true;
-            }
-            if (qtype == QType::NS || resourceRecord.qtype == QType::NS) {
-              ns_seen = true;
-            }
-            if (qtype.getCode() != resourceRecord.qtype.getCode()
-                && (exclusiveEntryTypes.count(qtype.getCode()) != 0
-                    || exclusiveEntryTypes.count(resourceRecord.qtype.getCode()) != 0)) {
-
-              // leave database handle in a consistent state
-              while (domainInfo.backend->get(resourceRecord)) {
-                ;
-              }
-
-              throw ApiException("RRset " + qname.toString() + " IN " + qtype.toString() + ": Conflicts with pre-existing RRset");
-            }
-          }
-
-          if (dname_seen && ns_seen && qname != zonename) {
-            throw ApiException("RRset " + qname.toString() + " IN " + qtype.toString() + ": Cannot have both NS and DNAME except in zone apex");
-          }
-          if (!new_records.empty() && domainInfo.kind == DomainInfo::Consumer) {
-            // Allow deleting all RRsets, just not modifying them.
-            throw ApiException("Modifying RRsets in Consumer zones is unsupported");
-          }
-          if (!new_records.empty() && ent_present) {
-            QType qt_ent{0};
-            if (!domainInfo.backend->replaceRRSet(domainInfo.id, qname, qt_ent, new_records)) {
-              throw ApiException("Hosting backend does not support editing records.");
-            }
-          }
-          if (!domainInfo.backend->replaceRRSet(domainInfo.id, qname, qtype, new_records)) {
-            throw ApiException("Hosting backend does not support editing records.");
-          }
-        }
-        if (replace_comments) {
-          if (!domainInfo.backend->replaceComments(domainInfo.id, qname, qtype, new_comments)) {
-            throw ApiException("Hosting backend does not support editing comments.");
-          }
-        }
+        changes.insert_or_assign(currentKey, operations | newOperation);
       }
       else {
-        throw ApiException("Changetype not understood");
+        changes.insert({currentKey, newOperation});
       }
     }
 
-    zone_disabled = (!backend.getSOAUncached(zonename, soaData));
+    // In this second pass, we will process the changes and maintain a cache
+    // of the RRset subject to PRUNE/EXTEND operations.
+    std::map<key, std::vector<DNSResourceRecord>> cache;
+    for (const auto& container : rrsets) {
+      string changetype = toUpper(stringFromJson(container, "changetype"));
+      auto operationType = validateChangeType(changetype);
+      DNSName qname;
+      QType qtype;
+      parseRecordNameAndType(container, qname, qtype);
 
-    // edit SOA (if needed)
-    if (!zone_disabled && !soa_edit_api_kind.empty() && !soa_edit_done) {
-      DNSResourceRecord resourceRecord;
-      if (makeIncreasedSOARecord(soaData, soa_edit_api_kind, soa_edit_kind, resourceRecord)) {
-        if (!domainInfo.backend->replaceRRSet(domainInfo.id, resourceRecord.qname, resourceRecord.qtype, vector<DNSResourceRecord>(1, resourceRecord))) {
-          throw ApiException("Hosting backend does not support editing records.");
-        }
+      key currentKey{qname, qtype};
+      bool cacheNeeded{false};
+      if (auto iter = changes.find(currentKey); iter != changes.end()) {
+        auto operations = iter->second;
+        cacheNeeded = (operations & ((1U << PRUNE) | (1U << EXTEND))) != 0;
       }
 
-      // return old and new serials in headers
-      resp->headers["X-PDNS-Old-Serial"] = std::to_string(soaData.serial);
-      fillSOAData(resourceRecord.content, soaData);
-      resp->headers["X-PDNS-New-Serial"] = std::to_string(soaData.serial);
+      applyResult result{NOP};
+      std::vector<DNSResourceRecord> rrset;
+      switch (operationType) {
+      case DELETE:
+        result = applyDelete(domainInfo, qname, qtype, cacheNeeded, rrset);
+        break;
+      case REPLACE:
+        result = applyReplace(domainInfo, zonename, container, qname, qtype, soa, cacheNeeded, rrset);
+        break;
+      case PRUNE:
+      case EXTEND:
+        // First, obtain the current RRset, either from the backend or from
+        // our local cache if we already did some operations.
+        if (const auto iter = cache.find(currentKey); iter != cache.end()) {
+          rrset = std::move(iter->second);
+        }
+        else {
+          DNSResourceRecord record;
+          domainInfo.backend->lookup(qtype, qname, static_cast<int>(domainInfo.id));
+          while (domainInfo.backend->get(record)) {
+            rrset.emplace_back(record);
+          }
+        }
+        result = applyPruneOrExtend(domainInfo, zonename, container, qname, qtype, soa, operationType, rrset);
+        break;
+      }
+#if 0 // Not possible in 4.9.x
+      if (result == ABORT) {
+        // Proper error response has been set up, no need to do anything further.
+        domainInfo.backend->abortTransaction();
+        return;
+      }
+#endif
+      if (result == SUCCESS) {
+        madeAnyChanges = true;
+      }
+      // Update RRset cache if needed.
+      if (cacheNeeded) {
+        cache.insert_or_assign(currentKey, std::move(rrset));
+      }
+    }
+    cache.clear();
+
+    if (madeAnyChanges) {
+      SOAData soaData;
+      bool zone_disabled = (!backend.getSOAUncached(zonename, soaData));
+
+      if (!zone_disabled && !soa.edit_api_kind.empty() && !soa.edit_done) {
+        DNSResourceRecord resourceRecord;
+        if (makeIncreasedSOARecord(soaData, soa.edit_api_kind, soa.edit_kind, resourceRecord)) {
+          if (!domainInfo.backend->replaceRRSet(domainInfo.id, resourceRecord.qname, resourceRecord.qtype, vector<DNSResourceRecord>(1, resourceRecord))) {
+            throw ApiException("Hosting backend does not support editing records.");
+          }
+        }
+
+        // return old and new serials in headers
+        resp->headers["X-PDNS-Old-Serial"] = std::to_string(soaData.serial);
+        fillSOAData(resourceRecord.content, soaData);
+        resp->headers["X-PDNS-New-Serial"] = std::to_string(soaData.serial);
+      }
+
+      // Rectify
+      DNSSECKeeper dnssecKeeper(&backend);
+      if (!zone_disabled && !dnssecKeeper.isPresigned(zonename) && isZoneApiRectifyEnabled(domainInfo)) {
+        string info;
+        string error_msg;
+        if (!dnssecKeeper.rectifyZone(zonename, error_msg, info, false)) {
+          throw ApiException("Failed to rectify '" + zonename.toString() + "' " + error_msg);
+        }
+      }
     }
   }
   catch (...) {
@@ -2480,20 +2742,15 @@ static void patchZone(UeberBackend& backend, const DNSName& zonename, DomainInfo
     throw;
   }
 
-  // Rectify
-  DNSSECKeeper dnssecKeeper(&backend);
-  if (!zone_disabled && !dnssecKeeper.isPresigned(zonename) && isZoneApiRectifyEnabled(domainInfo)) {
-    string info;
-    string error_msg;
-    if (!dnssecKeeper.rectifyZone(zonename, error_msg, info, false)) {
-      throw ApiException("Failed to rectify '" + zonename.toString() + "' " + error_msg);
-    }
+  if (madeAnyChanges) {
+    domainInfo.backend->commitTransaction();
+
+    DNSSECKeeper::clearCaches(zonename);
+    purgeAuthCaches(zonename.toString() + "$");
   }
-
-  domainInfo.backend->commitTransaction();
-
-  DNSSECKeeper::clearCaches(zonename);
-  purgeAuthCaches(zonename.toString() + "$");
+  else {
+    domainInfo.backend->abortTransaction();
+  }
 
   resp->body = "";
   resp->status = 204; // No Content, but indicate success
@@ -2578,6 +2835,9 @@ static void apiServerSearchData(HttpRequest* req, HttpResponse* resp)
         {"ttl", (double)resourceRecord.ttl},
         {"disabled", resourceRecord.disabled},
         {"content", makeApiRecordContent(resourceRecord.qtype, resourceRecord.content)}};
+      if (resourceRecord.last_modified != 0) {
+        object["modified_at"] = (double)resourceRecord.last_modified;
+      }
 
       val = zoneIdZone.find(resourceRecord.domain_id);
       if (val != zoneIdZone.end()) {
@@ -2703,6 +2963,7 @@ static void cssfunction(HttpRequest* /* req */, HttpResponse* resp)
   ret << ".resetring i { background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAA/klEQVQY01XPP04UUBgE8N/33vd2XZUWEuzYuMZEG4KFCQn2NhA4AIewAOMBPIG2xhNYeAcKGqkNCdmYlVBZGBIT4FHsbuE0U8xk/kAbqm9TOfI/nicfhmwgDNhvylUT58kxCp4l31L8SfH9IetJ2ev6PwyIwyZWsdb11/gbTK55Co+r8rmJaRPTFJcpZil+pTit7C5awMpA+Zpi1sRFE9MqflYOloYCjY2uP8EdYiGU4CVGUBubxKfOOLjrtOBmzvEilbVb/aQWvhRl0unBZVXe4XdnK+bprwqnhoyTsyZ+JG8Wk0apfExxlcp7PFruXH8gdxamWB4cyW2sIO4BG3czIp78jUIAAAAASUVORK5CYII=); width: 10px; height: 10px; margin-right: 2px; display: inline-block; background-repeat: no-repeat; }" << endl;
   ret << ".resetring:hover i { background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAA2ElEQVQY013PMUoDcRDF4c+kEzxCsNNCrBQvIGhnlcYm11EkBxAraw8gglgIoiJpAoKIYlBcgrgopsma3c3fwt1k9cHA480M8xvQp/nMjorOWY5ov7IAYlpjQk7aYxcuWBpwFQgJnUcaYk7GhEDIGL5w+MVpKLIRyR2b4JOjvGhUKzHTv2W7iuSN479Dvu9plf1awbQ6y3x1sU5tjpVJcMbakF6Ycoas8Dl5xEHJ160wRdfqzXfa6XQ4PLDlicWUjxHxZfndL/N+RhiwNzl/Q6PDhn/qsl76H7prcApk2B1aAAAAAElFTkSuQmCC);}" << endl;
   ret << ".resizering {float: right;}" << endl;
+  ret << "input, button { border: 0; padding: 0; background: inherit; text-decoration: underline; }" << endl;
   resp->body = ret.str();
   resp->status = 200;
 }
@@ -2752,10 +3013,13 @@ void AuthWebServer::webThread()
       d_ws->registerApiHandler("/api", apiDiscovery, "GET");
     }
     if (::arg().mustDo("webserver")) {
+      d_ws->registerWebHandler("/style.css", cssfunction, "GET");
+      // These two handlers need to be able to access our classes' fields,
+      // hence the use of lambdas to capture this and invoke a class method.
       d_ws->registerWebHandler(
-        "/style.css", [](HttpRequest* req, HttpResponse* resp) { cssfunction(req, resp); }, "GET");
+        "/", [this](HttpRequest* req, HttpResponse* resp) { indexGET(req, resp); }, "GET");
       d_ws->registerWebHandler(
-        "/", [this](HttpRequest* req, HttpResponse* resp) { indexfunction(req, resp); }, "GET");
+        "/", [this](HttpRequest* req, HttpResponse* resp) { indexPOST(req, resp); }, "POST");
       d_ws->registerWebHandler("/metrics", prometheusMetrics, "GET");
     }
     d_ws->go();

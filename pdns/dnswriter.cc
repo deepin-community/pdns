@@ -131,6 +131,9 @@ template <typename Container> void GenericDNSPacketWriter<Container>::addOpt(con
 
 template <typename Container> void GenericDNSPacketWriter<Container>::xfr48BitInt(uint64_t val)
 {
+  if ((val >> 48) != 0) {
+    throw runtime_error("Value too large to fit in 48 bits");
+  }
   std::array<unsigned char, 6> bytes;
   uint16_t theLeft = htons((val >> 32)&0xffffU);
   uint32_t theRight = htonl(val & 0xffffffffU);
@@ -145,23 +148,32 @@ template <typename Container> void GenericDNSPacketWriter<Container>::xfrNodeOrL
   d_content.insert(d_content.end(), val.content, val.content + sizeof(val.content));
 }
 
-template <typename Container> void GenericDNSPacketWriter<Container>::xfr32BitInt(uint32_t val)
+template <typename Container> void GenericDNSPacketWriter<Container>::xfr32BitInt(uint64_t val)
 {
-  uint32_t rval=htonl(val);
+  if (val > std::numeric_limits<uint32_t>::max()) {
+    throw runtime_error("Value too large to fit in 32 bits");
+  }
+  uint32_t rval=htonl(static_cast<uint32_t>(val));
   uint8_t* ptr=reinterpret_cast<uint8_t*>(&rval);
   d_content.insert(d_content.end(), ptr, ptr+4);
 }
 
-template <typename Container> void GenericDNSPacketWriter<Container>::xfr16BitInt(uint16_t val)
+template <typename Container> void GenericDNSPacketWriter<Container>::xfr16BitInt(uint64_t val)
 {
-  uint16_t rval=htons(val);
+  if (val > std::numeric_limits<uint16_t>::max()) {
+    throw runtime_error("Value too large to fit in 16 bits");
+  }
+  uint16_t rval=htons(static_cast<uint16_t>(val));
   uint8_t* ptr=reinterpret_cast<uint8_t*>(&rval);
   d_content.insert(d_content.end(), ptr, ptr+2);
 }
 
-template <typename Container> void GenericDNSPacketWriter<Container>::xfr8BitInt(uint8_t val)
+template <typename Container> void GenericDNSPacketWriter<Container>::xfr8BitInt(uint64_t val)
 {
-  d_content.push_back(val);
+  if (val > std::numeric_limits<uint8_t>::max()) {
+    throw runtime_error("Value too large to fit in 8 bits");
+  }
+  d_content.push_back(static_cast<uint8_t>(val));
 }
 
 
@@ -198,8 +210,12 @@ template <typename Container> void GenericDNSPacketWriter<Container>::xfrUnquote
     d_content.push_back(0);
     return;
   }
-  if(lenField)
+  if (lenField) {
+    if (text.length() > 255) {
+      throw runtime_error("invalid unquoted text length");
+    }
     d_content.push_back(text.length());
+  }
   d_content.insert(d_content.end(), text.c_str(), text.c_str() + text.length());
 }
 
@@ -413,11 +429,14 @@ template <typename Container> void GenericDNSPacketWriter<Container>::xfrSvcPara
       break;
     case SvcParam::alpn:
     {
-      uint16_t totalSize = param.getALPN().size(); // All 1 octet size headers for each value
+      size_t totalSize = param.getALPN().size(); // All 1 octet size headers for each value
       for (auto const &a : param.getALPN()) {
         totalSize += a.length();
       }
-      xfr16BitInt(totalSize);
+      if (totalSize > std::numeric_limits<uint16_t>::max()) {
+        throw runtime_error("invalid total length of alpn parameters");
+      }
+      xfr16BitInt(static_cast<uint16_t>(totalSize));
       for (auto const &a : param.getALPN()) {
         xfrUnquotedText(a, true); // will add the 1-byte length field
       }

@@ -1,3 +1,48 @@
+pdns (4.9.18-0+deb13u1) trixie-security; urgency=medium
+
+  * New upstream version 4.9.18, fixing security issue
+    CVE-2026-73206 (Closes: #1152255)
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Tue, 27 Oct 2026 11:56:54 +0100
+
+pdns (4.9.17-0+deb13u1) trixie-security; urgency=medium
+
+  * New upstream version 4.9.17, fixing security issue
+    CVE-2026-52682
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Thu, 06 Aug 2026 21:04:06 +0200
+
+pdns (4.9.16-0+deb13u1) trixie-security; urgency=medium
+
+  * New upstream version 4.9.16, fixing security issue
+    CVE-2026-42005.
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Tue, 16 Jun 2026 23:55:19 +0200
+
+pdns (4.9.15-0+deb13u1) trixie-security; urgency=medium
+
+  * New upstream version 4.9.15, fixing security issues
+    CVE-2026-42000, CVE-2026-42001, CVE-2026-42002, CVE-2026-42396.
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Sun, 17 May 2026 23:31:56 +0200
+
+pdns (4.9.14-0+deb13u1) trixie-security; urgency=medium
+
+  * New upstream version 4.9.14, fixing security issues CVE-2026-33257,
+    CVE-2026-33260, CVE-2026-33611, CVE-2026-33610, CVE-2026-33609,
+    CVE-2026-33608.
+  * d/gbp.conf: setup for trixie
+  * d/watch: restrict to 4.x series
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Sun, 26 Apr 2026 21:40:16 +0200
+
+pdns (4.9.7-1) unstable; urgency=medium
+
+  * New upstream version 4.9.7
+  * Drop upstream-applied patch
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Mon, 07 Jul 2025 12:15:52 +0200
+
 pdns (4.9.4-2) unstable; urgency=medium
 
   * Add upstream-pending patch to fix mysqlbackend on s390x
