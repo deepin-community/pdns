@@ -1,0 +1,34 @@
+#!/bin/bash
+exec 2>&1
+set -ex
+
+ZONE=lmdb.example.org
+
+pdnsutil create-zone smoke.$ZONE
+chown pdns: /var/lib/powerdns/pdns.lmdb*
+
+lsipc
+service pdns restart || (journalctl _SYSTEMD_UNIT=pdns.service -n 10 --no-pager || true)
+if journalctl _SYSTEMD_UNIT=pdns.service -n 30 | grep 'Failed to set up IPC namespacing'; then
+  echo "Assuming autopkgtest/LXC isolation bug, aborting"
+  exit 77
+fi
+
+TMPFILE=$(mktemp)
+cleanup() {
+  rm -f "$TMPFILE"
+  journalctl _SYSTEMD_UNIT=pdns.service -n 100 --no-pager || true
+  service pdns stop
+  rm -f /var/lib/powerdns/pdns.lmdb*
+}
+trap cleanup EXIT
+
+sdig 127.0.0.1 53 smoke.$ZONE SOA 2>&1 | tee "$TMPFILE"
+
+if grep -c 'a.misconfigured' "$TMPFILE"; then
+    echo success
+else
+    echo smoke.$ZONE could not be resolved
+    exit 1
+fi
+

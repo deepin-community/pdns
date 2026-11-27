@@ -1,0 +1,6 @@
+${env:deb_systemdsystemunitdir}/pdns*
+usr/bin/pdns_control
+usr/bin/pdnsutil
+usr/bin/zone2json
+usr/bin/zone2sql
+usr/sbin/pdns_server

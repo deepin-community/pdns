@@ -1,0 +1,64 @@
+Tests:
+ smoke-bind,
+Depends:
+ pdns-backend-bind,
+ pdns-server,
+ pdns-tools,
+Restrictions:
+ isolation-container,
+ needs-root,
+ skippable,
+
+Tests:
+ smoke-lmdb,
+Depends:
+ pdns-backend-lmdb,
+ pdns-server,
+ pdns-tools,
+Restrictions:
+ isolation-container,
+ needs-root,
+ skippable,
+
+Tests:
+ smoke-mysql,
+Depends:
+ default-mysql-server,
+ pdns-backend-mysql,
+ pdns-server,
+ pdns-tools,
+Restrictions:
+ isolation-container,
+ needs-root,
+ skippable,
+
+Tests:
+ smoke-mysql-sp,
+Depends:
+ default-mysql-server,
+ pdns-backend-mysql,
+ pdns-server,
+ pdns-tools,
+Restrictions:
+ isolation-container,
+ needs-root,
+ skippable,
+
+Tests:
+ smoke-pgsql,
+Depends:
+ pdns-backend-pgsql,
+ pdns-server,
+ pdns-tools,
+ postgresql,
+Restrictions:
+ isolation-container,
+ needs-root,
+ skippable,
+
+Tests:
+ supported-algos,
+Depends:
+ pdns-server,
+Restrictions:
+ isolation-container,
