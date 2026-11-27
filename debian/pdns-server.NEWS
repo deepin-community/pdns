@@ -1,0 +1,11 @@
+pdns (4.7.1-1) unstable; urgency=medium
+
+  Upstream has renamed a number of configuration settings. You must
+  manually update your pdns.conf and included configuration files.
+  Backend schemas and data also need updates. SHA1 DS is deprecated.
+  For backends supporting "dnssec" mode, I suggest turning it on.
+
+  Please see the upstream upgrading guide at
+    https://doc.powerdns.com/authoritative/upgrading.html
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Sat, 29 Oct 2022 18:21:49 +0000

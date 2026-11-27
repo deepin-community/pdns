@@ -1,0 +1,4 @@
+remove-on-upgrade /etc/default/pdns
+remove-on-upgrade /etc/init.d/pdns
+remove-on-upgrade /etc/insserv.d/pdns-server
+remove-on-upgrade /etc/resolvconf/update.d/pdns
