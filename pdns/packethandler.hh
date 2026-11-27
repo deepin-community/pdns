@@ -68,7 +68,7 @@ public:
   static const std::shared_ptr<CDSRecordContent> s_deleteCDSContent;
 
 private:
-  int tryAutoPrimary(const DNSPacket& p, const DNSName& tsigkeyname);
+  int tryAutoPrimary(const DNSPacket& p);
   int processNotify(const DNSPacket& );
   void addRootReferral(DNSPacket& r);
   int doChaosRequest(const DNSPacket& p, std::unique_ptr<DNSPacket>& r, DNSName &target) const;
@@ -116,7 +116,6 @@ private:
   bool d_dnssec{false};
   SOAData d_sd;
   std::unique_ptr<AuthLua4> d_pdl;
-  std::unique_ptr<AuthLua4> d_update_policy_lua;
   std::unique_ptr<AuthLua4> s_LUA;
   UeberBackend B; // every thread an own instance
   DNSSECKeeper d_dk; // B is shared with DNSSECKeeper

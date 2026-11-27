@@ -847,6 +847,17 @@ BOOST_AUTO_TEST_CASE(test_invalid_label_length) { // Invalid label length in qna
   BOOST_CHECK_THROW(DNSName dn(name.c_str(), name.size(), 0, true), std::range_error);
 }
 
+BOOST_AUTO_TEST_CASE(test_name_length_too_long_from_wire) {
+
+  string name("\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x05""stats""\x05""stats""\x02""fr""\x00", 256);
+  BOOST_CHECK_THROW(DNSName(name.c_str(), name.size(), 0, true), std::range_error);
+}
+
+BOOST_AUTO_TEST_CASE(test_name_length_too_long_from_wire_compressed) {
+  string name("\x0a""wwwwwwwwww""\x00""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x05""stats""\x05""stats""\x02""fr""\xc0""\x00", 265);
+  BOOST_CHECK_THROW(DNSName(name.c_str(), name.size(), 12, true), std::range_error);
+}
+
 BOOST_AUTO_TEST_CASE(test_compression) { // Compression test
 
   string name("\x03""com\x00""\x07""example\xc0""\x00""\x03""www\xc0""\x05", 21);
@@ -944,8 +955,30 @@ BOOST_AUTO_TEST_CASE(test_compression_loop1) { // Compression loop (pointer loop
 BOOST_AUTO_TEST_CASE(test_compression_loop2) { // Compression loop (deep recursion)
 
   int i;
+  DNSName::s_maxPointersToPointers = 98;
+  DNSName::s_maxPointersPerName = 99;
   string name("\x00\xc0\x00", 3);
   for (i=0; i<98; ++i) {
+    name.append( 1, ((i >> 7) & 0xff) | 0xc0);
+    name.append( 1, ((i << 1) & 0xff) | 0x01);
+  }
+  size_t budget = 99;
+  BOOST_CHECK_NO_THROW(DNSName dn(name.c_str(), name.size(), name.size()-2, true, nullptr, nullptr, nullptr, 0, &budget));
+
+  ++i;
+  name.append( 1, ((i >> 7) & 0xff) | 0xc0);
+  name.append( 1, ((i << 1) & 0xff) | 0x01);
+
+  BOOST_CHECK_THROW(DNSName dn(name.c_str(), name.size(), name.size()-2, true), std::range_error);
+  DNSName::s_maxPointersToPointers = 4;
+  DNSName::s_maxPointersPerName = 10;
+}
+
+BOOST_AUTO_TEST_CASE(test_compression_loop3) { // Compression loop (direct pointer to pointer)
+
+  int i;
+  string name("\x00\xc0\x00", 3);
+  for (i=0; i<2; ++i) {
     name.append( 1, ((i >> 7) & 0xff) | 0xc0);
     name.append( 1, ((i << 1) & 0xff) | 0x01);
   }

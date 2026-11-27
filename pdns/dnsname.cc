@@ -31,6 +31,9 @@
 
 const DNSName g_rootdnsname("."), g_wildcarddnsname("*");
 
+uint16_t DNSName::s_maxPointersToPointers = 4;
+uint16_t DNSName::s_maxPointersPerName = 10;
+
 /* raw storage
    in DNS label format, with trailing 0. W/o trailing 0, we are 'empty'
    www.powerdns.com = 3www8powerdns3com0
@@ -99,7 +102,7 @@ DNSName::DNSName(const std::string_view sw)
   }
 }
 
-DNSName::DNSName(const char* pos, size_t len, size_t offset, bool uncompress, uint16_t* qtype, uint16_t* qclass, unsigned int* consumed, uint16_t minOffset)
+DNSName::DNSName(const char* pos, size_t len, size_t offset, bool uncompress, uint16_t* qtype, uint16_t* qclass, unsigned int* consumed, uint16_t minOffset, size_t* pointerBudget)
 {
   if (offset >= len)
     throw std::range_error("Trying to read past the end of the buffer ("+std::to_string(offset)+ " >= "+std::to_string(len)+")");
@@ -110,7 +113,7 @@ DNSName::DNSName(const char* pos, size_t len, size_t offset, bool uncompress, ui
     }
   }
 
-  packetParser(pos, len, offset, uncompress, qtype, qclass, consumed, 0, minOffset);
+  packetParser(pos, len, offset, uncompress, qtype, qclass, consumed, 0, minOffset, 0, pointerBudget);
 }
 
 static void checkLabelLength(uint8_t length)
@@ -127,6 +130,8 @@ static void checkLabelLength(uint8_t length)
 size_t DNSName::parsePacketUncompressed(const UnsignedCharView& view, size_t pos, bool uncompress)
 {
   const size_t initialPos = pos;
+  auto existingSize = d_storage.size();
+  const size_t neededSizeForFinalLabel = /* final empty label length */ (existingSize == 0 ? 1U : 0U);
   size_t totalLength = 0;
   unsigned char labellen = 0;
 
@@ -151,23 +156,26 @@ size_t DNSName::parsePacketUncompressed(const UnsignedCharView& view, size_t pos
       throw std::range_error("Found an invalid label length in qname (only one of the first two bits is set)");
     }
     checkLabelLength(labellen);
-    // reserve one byte for the label length
-    if (totalLength + labellen > s_maxDNSNameLength - 1) {
+
+    // reserve one byte for the label length, plus one byte for the final empty label if we were empty before
+    if ((existingSize + totalLength + labellen + 1U + neededSizeForFinalLabel) > s_maxDNSNameLength) {
       throw std::range_error("name too long to append");
     }
     if (pos + labellen >= view.size()) {
       throw std::range_error("Found an invalid label length in qname");
     }
     pos += labellen;
-    totalLength += 1 + labellen;
+    totalLength += 1U + labellen;
   }
   while (pos < view.size());
 
   if (totalLength != 0) {
-    auto existingSize = d_storage.size();
     if (existingSize > 0) {
       // remove the last label count, we are about to override it */
       --existingSize;
+    }
+    if ((existingSize + totalLength + 1U) > s_maxDNSNameLength) {
+      throw std::range_error("name too long to append");
     }
     d_storage.reserve(existingSize + totalLength + 1);
     d_storage.resize(existingSize + totalLength);
@@ -178,7 +186,7 @@ size_t DNSName::parsePacketUncompressed(const UnsignedCharView& view, size_t pos
 }
 
 // this should be the __only__ dns name parser in PowerDNS.
-void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool uncompress, uint16_t* qtype, uint16_t* qclass, unsigned int* consumed, int depth, uint16_t minOffset)
+void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool uncompress, uint16_t* qtype, uint16_t* qclass, unsigned int* consumed, int depth, uint16_t minOffset, uint16_t pointerChainLength, size_t *pointerBudget)
 {
   if (offset >= len) {
     throw std::range_error("Trying to read past the end of the buffer ("+std::to_string(offset)+ " >= "+std::to_string(len)+")");
@@ -192,7 +200,24 @@ void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool unc
   UnsignedCharView view(qpos, len);
   auto pos = parsePacketUncompressed(view, offset, uncompress);
 
+
   labellen = view.at(pos);
+  if (pos == offset && labellen != 0) {
+    // It's a pointer
+    if (pointerBudget != nullptr) {
+      if (*pointerBudget == 0) {
+        throw std::range_error("Too many compression pointers processed in packet");
+      }
+      (*pointerBudget)--;
+    }
+    // Are we chasing a pointer chain already for this name?
+    if (pointerChainLength++ > s_maxPointersToPointers) {
+      throw std::range_error("Too many pointer to pointers during decompression (" + std::to_string(pointerChainLength) + ")");
+    }
+  }
+  else {
+    pointerChainLength = 0; // not an immediate pointer to pointer case any more
+  }
   pos++;
   if (labellen != 0 && pos < view.size()) {
     if (labellen < 0xc0) {
@@ -214,11 +239,11 @@ void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool unc
       throw std::range_error("Invalid label position during decompression ("+std::to_string(newpos)+ " < "+std::to_string(minOffset)+")");
     }
 
-    if (++depth > 100) {
-      throw std::range_error("Abort label decompression after 100 redirects");
+    if (++depth > s_maxPointersPerName) {
+      throw std::range_error("Abort label decompression after too many redirects (" + std::to_string(depth) + ")");
     }
 
-    packetParser(qpos, len, newpos, true, nullptr, nullptr, nullptr, depth, minOffset);
+    packetParser(qpos, len, newpos, true, nullptr, nullptr, nullptr, depth, minOffset, pointerChainLength, pointerBudget);
 
     pos++;
   }
